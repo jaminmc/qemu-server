@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -370,23 +371,41 @@ static void cleanup_qemu_client(struct Client *client) {
     unsigned short guest = client->qemu.guest;
     char vmid[sizeof(client->qemu.vmid)];
     strncpy(vmid, client->qemu.vmid, sizeof(vmid));
+
+    int pidfd = client->pidfd;
+    client->pidfd = -1;
+
+    if (pidfd <= 0) {
+        pidfd = pidfd_open(client->pid, 0);
+    }
+
     g_hash_table_remove(vm_clients, &vmid); // frees key, ignore errors
     VERBOSE_PRINT("%s: executing cleanup (graceful: %d, guest: %d)\n", vmid, graceful, guest);
 
     int pid = fork();
     if (pid < 0) {
         fprintf(stderr, "fork failed: %s\n", strerror(errno));
+        if (pidfd > 0) (void)close(pidfd);
         return;
     }
     if (pid == 0) {
+        if (pidfd > 0) {
+            struct pollfd pfd = { .fd = pidfd, .events = POLLIN };
+            if (poll(&pfd, 1, 10 * 1000) < 0) {
+                perror("poll on pidfd");
+            }
+            (void)close(pidfd);
+        }
+
         char *script = "/usr/sbin/qm";
-
         char *args[] = {script, "cleanup", vmid, graceful ? "1" : "0", guest ? "1" : "0", NULL};
-
         execvp(script, args);
         perror("execvp");
         _exit(1);
     }
+
+    // parent
+    if (pidfd > 0) (void)close(pidfd);
 }
 
 void cleanup_client(struct Client *client) {
