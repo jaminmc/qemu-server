@@ -657,8 +657,8 @@ EODESCR
     bios => {
         optional => 1,
         type => 'string',
-        enum => [qw(seabios ovmf)],
-        description => "Select BIOS implementation.",
+        pattern => '(?:seabios|ovmf(?:,(?:code|vars)=.+)*)',
+        description => "Select BIOS implementation. Can specify custom OVMF firmware files.",
         default => 'seabios',
     },
     vmgenid => {
@@ -8021,6 +8021,24 @@ sub qemu_use_old_bios_files {
     return ($use_old_bios_files, $machine_type);
 }
 
+sub get_bios_type {
+    my ($conf) = @_;
+
+    return undef if !$conf->{bios};
+
+    my $bios_conf = $conf->{bios};
+
+    # Handle both simple string format (legacy) and structured format
+    # Simple: "ovmf" or "seabios"
+    # Structured: "ovmf,code=/path/to/code.fd,vars=/path/to/vars.fd"
+    if ($bios_conf =~ m/,/) {
+        my @parts = split(/,/, $bios_conf);
+        return shift @parts;
+    }
+
+    return $bios_conf;
+}
+
 sub get_efivars_size {
     my ($conf, $efidisk) = @_;
 
@@ -8029,7 +8047,8 @@ sub get_efivars_size {
     my $smm = PVE::QemuServer::Machine::machine_type_is_q35($conf);
     my $cvm_type = get_cvm_type($conf);
 
-    return PVE::QemuServer::OVMF::get_efivars_size($arch, $efidisk, $smm, $cvm_type);
+    my $storecfg = PVE::Storage::config();
+    return PVE::QemuServer::OVMF::get_efivars_size($conf, $storecfg, $arch, $efidisk, $smm, $cvm_type);
 }
 
 sub update_efidisk_size {

@@ -40,6 +40,38 @@ PVE::JSONSchema::register_standard_option(
     },
 );
 
+my $bios_fmt = {
+    type => {
+        type => 'string',
+        enum => [qw(seabios ovmf)],
+        description => "Select BIOS implementation.",
+        default_key => 1,
+    },
+    code => {
+        type => 'string',
+        format => 'pve-volume-id-or-qm-path',
+        format_description => 'volume',
+        description => "Custom OVMF_CODE firmware file. Accepts storage volumes or absolute filesystem paths.",
+        optional => 1,
+    },
+    vars => {
+        type => 'string',
+        format => 'pve-volume-id-or-qm-path',
+        format_description => 'volume',
+        description => "Custom OVMF_VARS firmware file. Accepts storage volumes or absolute filesystem paths.",
+        optional => 1,
+    },
+};
+
+my $bios_desc = {
+    optional => 1,
+    type => 'string',
+    format => $bios_fmt,
+    description => "Select BIOS implementation. Can specify custom OVMF firmware files.",
+};
+
+PVE::JSONSchema::register_standard_option("pve-vm-bios", $bios_desc);
+
 # Check that a volume can be used for image-related operations with QEMU, in
 # particular, attached as VM image or ISO, used for qemu-img, or (live-)imported.
 # NOTE Currently, this helper cannot be used for backups.

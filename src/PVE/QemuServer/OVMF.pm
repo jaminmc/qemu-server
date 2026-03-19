@@ -17,6 +17,75 @@ use PVE::QemuServer::QemuImage;
 use PVE::QemuServer::QSD;
 
 my $EDK2_FW_BASE = '/usr/share/pve-edk2-firmware/';
+
+# Parse bios config and return custom OVMF files if specified
+my sub get_custom_ovmf_files($$$) {
+    my ($conf, $storecfg, $arch) = @_;
+
+    return undef if !$conf->{bios};
+
+    my $bios_conf = $conf->{bios};
+
+    # Handle both simple string format (legacy) and structured format
+    # Simple: "ovmf" or "seabios" (uses built-in OVMF files)
+    # Structured: "ovmf,code=/path/to/code.fd,vars=/path/to/vars.fd" (uses custom files)
+    my $bios_type = $bios_conf;
+    my $custom_code;
+    my $custom_vars;
+
+    if ($bios_conf =~ m/,/) {
+        # Structured format - parse as key=value pairs
+        my @parts = split(/,/, $bios_conf);
+        $bios_type = shift @parts;
+
+        foreach my $part (@parts) {
+            if ($part =~ m/^code=(.+)$/) {
+                $custom_code = $1;
+            } elsif ($part =~ m/^vars=(.+)$/) {
+                $custom_vars = $1;
+            }
+        }
+    }
+
+    # Return early if no custom OVMF specified - use defaults
+    return undef unless $custom_code && $custom_vars;
+
+    # CRITICAL: code and vars are an all-or-nothing pair
+    # Both must be specified together to ensure compatibility
+    # - code: firmware binary (read-only after boot)
+    # - vars: EFI variables store (read-write during runtime)
+    # Mismatched versions could cause boot failures
+    die "Custom OVMF requires both 'code' and 'vars' to be specified\n"
+        if $custom_code && !$custom_vars || !$custom_code && $custom_vars;
+
+    # Resolve storage paths to filesystem paths and validate existence
+    my $code_path = _resolve_ovmf_path($storecfg, $custom_code, 'code');
+    my $vars_path = _resolve_ovmf_path($storecfg, $custom_vars, 'vars');
+
+    return ($code_path, $vars_path);
+}
+
+# Helper to resolve OVMF file paths (storage IDs or filesystem paths)
+my sub _resolve_ovmf_path($$$) {
+    my ($storecfg, $path, $type) = @_;
+
+    return undef unless $path;
+
+    # Check if it's a storage path (contains ':')
+    if ($path =~ m/^([^:]+):(.+)$/) {
+        # Storage volume path
+        my $resolved_path = eval { PVE::Storage::path($storecfg, $path) };
+        die "Invalid OVMF_$type storage path '$path': $@" if $@;
+        die "OVMF_$type file does not exist at '$resolved_path'\n" if !-f $resolved_path;
+        return $resolved_path;
+    } else {
+        # Absolute filesystem path
+        die "OVMF_$type path must be absolute\n" if !($path =~ m/^\//);
+        die "OVMF_$type file does not exist at '$path'\n" if !-f $path;
+        return $path;
+    }
+}
+
 my $OVMF = {
     x86_64 => {
         '4m-no-smm' => [
@@ -54,8 +123,14 @@ my $OVMF = {
     },
 };
 
-my sub get_ovmf_files($$$$) {
-    my ($arch, $efidisk, $smm, $cvm_type) = @_;
+my sub get_ovmf_files($$$$$$) {
+    my ($conf, $storecfg, $arch, $efidisk, $smm, $cvm_type) = @_;
+
+    # Check for custom OVMF files first
+    my ($code, $vars) = get_custom_ovmf_files($conf, $storecfg, $arch);
+    if (defined($code) && defined($vars)) {
+        return ($code, $vars);
+    }
 
     my $types = $OVMF->{$arch}
         or die "no OVMF images known for architecture '$arch'\n";
@@ -66,15 +141,15 @@ my sub get_ovmf_files($$$$) {
             $type = "4m-snp";
             my ($ovmf) = $types->{$type}->@*;
             die "EFI base image '$ovmf' not found\n" if !-f $ovmf;
-            return ($ovmf);
+            return ($ovmf, undef);
         } elsif ($cvm_type && ($cvm_type eq 'std' || $cvm_type eq 'es')) {
             $type = "4m-sev";
         } elsif ($cvm_type && $cvm_type eq 'tdx') {
             $type = "4m-tdx";
             my ($ovmf) = $types->{$type}->@*;
             die "EFI base image '$ovmf' not found\n" if !-f $ovmf;
-            return ($ovmf);
-        } elsif (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
+            return ($ovmf, undef);
+        } elsif ($efidisk && defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
             $type = $smm ? "4m" : "4m-no-smm";
             $type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
         } else {
@@ -102,7 +177,7 @@ my sub print_ovmf_drive_commandlines {
     die "Attempting to configure TDX with pflash devices instead of using `-bios`\n"
         if $cvm_type && $cvm_type eq 'tdx';
 
-    my ($ovmf_code, $ovmf_vars) = get_ovmf_files($arch, $d, $q35, $cvm_type);
+    my ($ovmf_code, $ovmf_vars) = get_ovmf_files($conf, $storecfg, $arch, $d, $q35, $cvm_type);
 
     my $var_drive_str = "if=pflash,unit=1,id=drive-efidisk0";
     if ($d) {
@@ -122,23 +197,23 @@ my sub print_ovmf_drive_commandlines {
         $var_drive_str .= ",format=$format,file=$path";
 
         $var_drive_str .= ",size=" . (-s $ovmf_vars)
-            if $format eq 'raw' && $version_guard->(4, 1, 2);
+            if $format eq 'raw' && defined($ovmf_vars) && $version_guard->(4, 1, 2);
         $var_drive_str .= ',readonly=on' if $readonly;
     } else {
         log_warn("no efidisk configured! Using temporary efivars disk.");
         my $path = "/tmp/$vmid-ovmf.fd";
-        PVE::Tools::file_copy($ovmf_vars, $path, -s $ovmf_vars);
+        PVE::Tools::file_copy($ovmf_vars, $path, -s $ovmf_vars) if defined($ovmf_vars);
         $var_drive_str .= ",format=raw,file=$path";
-        $var_drive_str .= ",size=" . (-s $ovmf_vars) if $version_guard->(4, 1, 2);
+        $var_drive_str .= ",size=" . (-s $ovmf_vars) if defined($ovmf_vars) && $version_guard->(4, 1, 2);
     }
 
     return ("if=pflash,unit=0,format=raw,readonly=on,file=$ovmf_code", $var_drive_str);
 }
 
 sub get_efivars_size {
-    my ($arch, $efidisk, $smm, $cvm_type) = @_;
+    my ($conf, $storecfg, $arch, $efidisk, $smm, $cvm_type) = @_;
 
-    my (undef, $ovmf_vars) = get_ovmf_files($arch, $efidisk, $smm, $cvm_type);
+    my (undef, $ovmf_vars) = get_ovmf_files($conf, $storecfg, $arch, $efidisk, $smm, $cvm_type);
     return -s $ovmf_vars;
 }
 
@@ -169,7 +244,9 @@ my sub is_ms_2023_cert_enrolled {
 sub create_efidisk($$$$$$$$) {
     my ($storecfg, $storeid, $vmid, $fmt, $arch, $efidisk, $smm, $cvm_type) = @_;
 
-    my (undef, $ovmf_vars) = get_ovmf_files($arch, $efidisk, $smm, $cvm_type);
+    # For creating the initial EFI disk template, we always use the default OVMF files
+    # Custom OVMF files are only used when running the VM
+    my (undef, $ovmf_vars) = get_ovmf_files({}, $storecfg, $arch, $efidisk, $smm, $cvm_type);
 
     my $vars_size_b = -s $ovmf_vars;
     my $vars_size = PVE::Tools::convert_size($vars_size_b, 'b' => 'kb');
@@ -197,7 +274,10 @@ my sub generate_ovmf_blockdev {
     die "Attempting to configure SEV-SNP with pflash devices instead of using `-bios`\n"
         if $cvm_type && $cvm_type eq 'snp';
 
-    my ($ovmf_code, $ovmf_vars) = get_ovmf_files($arch, $drive, $q35, $cvm_type);
+    die "Attempting to configure TDX with pflash devices instead of using `-bios`\n"
+        if $cvm_type && $cvm_type eq 'tdx';
+
+    my ($ovmf_code, $ovmf_vars) = get_ovmf_files($conf, $storecfg, $arch, $drive, $q35, $cvm_type);
 
     my $ovmf_code_blockdev = {
         driver => 'raw',
@@ -231,7 +311,7 @@ my sub generate_ovmf_blockdev {
     my $extra_blockdev_options = {};
     $extra_blockdev_options->{'read-only'} = 1 if $readonly;
 
-    $extra_blockdev_options->{size} = -s $ovmf_vars if $format eq 'raw';
+    $extra_blockdev_options->{size} = -s $ovmf_vars if $format eq 'raw' && defined($ovmf_vars);
 
     my $throttle_group = PVE::QemuServer::Blockdev::generate_throttle_group($drive);
 
@@ -256,7 +336,8 @@ sub print_ovmf_commandline {
                 "EFI disks are not supported with Confidential Virtual Machines and will be ignored"
             );
         }
-        push $cmd->@*, '-bios', get_ovmf_files($hw_info->{arch}, undef, undef, $cvm_type);
+        my ($ovmf_code) = get_ovmf_files($conf, $storecfg, $hw_info->{arch}, undef, undef, $cvm_type);
+        push $cmd->@*, '-bios', $ovmf_code;
     } else {
         if ($version_guard->(10, 0, 0)) { # for the switch to -blockdev
             my ($code_blockdev, $vars_blockdev, $throttle_group) =
