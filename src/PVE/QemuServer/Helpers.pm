@@ -10,6 +10,7 @@ use JSON;
 use PVE::Cluster;
 use PVE::INotify;
 use PVE::ProcFSTools;
+use PVE::Storage;
 use PVE::Tools qw(get_host_arch);
 
 use base 'Exporter';
@@ -29,8 +30,83 @@ my $arch_to_qemu_binary = {
     x86_64 => '/usr/bin/qemu-system-x86_64',
 };
 
-sub get_command_for_arch($) {
-    my ($arch) = @_;
+# Resolve custom QEMU binary path (storage or filesystem)
+my sub _resolve_qemu_binary_path($$$) {
+    my ($storecfg, $path, $validate) = @_;
+
+    return undef unless $path;
+
+    # Check if it's a storage path (contains ':')
+    if ($path =~ m/^([^:]+):(.+)$/) {
+        # Storage volume path
+        my $resolved_path = PVE::Storage::path($storecfg, $path);
+        die "unable to resolve storage path '$path'\n" if !$resolved_path;
+        $path = $resolved_path;
+    }
+
+    # At this point, $path should be an absolute filesystem path
+    die "QEMU binary path must be absolute: '$path'\n" if $path !~ m/^\//;
+
+    # Validate file exists and is readable
+    die "QEMU binary does not exist at '$path'\n" if !-e $path;
+    die "QEMU binary is not readable at '$path'\n" if !-r $path;
+
+    # Validate executable if requested
+    if ($validate) {
+        die "QEMU binary is not executable at '$path'\n" if !-x $path;
+    }
+
+    return $path;
+}
+
+# Get custom QEMU binary for a specific architecture from VM config
+my sub get_custom_qemu_binary($$$) {
+    my ($conf, $storecfg, $arch) = @_;
+
+    # Look for per-architecture custom binary config
+    my $custom_binary_key = "qemu_binary_$arch";
+    return undef if !$conf->{$custom_binary_key};
+
+    my $binary_conf = $conf->{$custom_binary_key};
+
+    # Parse structured format: "path,validate=1|0" or simple "path"
+    my $custom_path;
+    my $validate = 1; # default is to validate
+
+    if ($binary_conf =~ m/,/) {
+        # Structured format - parse as key=value pairs
+        my @parts = split(/,/, $binary_conf);
+        $custom_path = shift @parts;
+
+        foreach my $part (@parts) {
+            if ($part =~ m/^validate=([01])$/) {
+                $validate = $1;
+            }
+        }
+    } else {
+        # Simple format - just the path
+        $custom_path = $binary_conf;
+    }
+
+    # Resolve and validate the binary path
+    my $resolved_path = _resolve_qemu_binary_path($storecfg, $custom_path, $validate);
+
+    return $resolved_path;
+}
+
+sub get_command_for_arch($$) {
+    my ($arch, $conf) = @_;
+    $conf //= {}; # Allow undef conf for backward compatibility
+
+    # Check for custom binary first
+    my $custom_binary_key = "qemu_binary_$arch";
+    if ($conf->{$custom_binary_key}) {
+        my $storecfg = PVE::Storage::config();
+        my $custom_binary = get_custom_qemu_binary($conf, $storecfg, $arch);
+        return $custom_binary if $custom_binary;
+    }
+
+    # Fall back to default binary selection
     return '/usr/bin/kvm' if get_host_arch() eq $arch; # i.e. native arch
 
     my $cmd = $arch_to_qemu_binary->{$arch}
@@ -49,7 +125,7 @@ my $kvm_mtime = {};
 sub kvm_user_version {
     my ($binary) = @_;
 
-    $binary //= get_command_for_arch(get_host_arch()); # get the native arch by default
+    $binary //= get_command_for_arch(get_host_arch(), {}); # get the native arch by default
     my $st = stat($binary);
 
     my $cachedmtime = $kvm_mtime->{$binary} // -1;

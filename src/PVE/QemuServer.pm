@@ -661,6 +661,16 @@ EODESCR
         description => "Select BIOS implementation. Can specify custom OVMF firmware files.",
         default => 'seabios',
     },
+    qemu_binary_x86_64 => {
+        optional => 1,
+        type => 'string',
+        description => "Custom QEMU binary for x86_64 VMs. Path or storage volume ID.",
+    },
+    qemu_binary_aarch64 => {
+        optional => 1,
+        type => 'string',
+        description => "Custom QEMU binary for aarch64 VMs. Path or storage volume ID.",
+    },
     vmgenid => {
         type => 'string',
         pattern => '(?:[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}|[01])',
@@ -1995,7 +2005,7 @@ sub parse_vm_config {
             } else {
                 $handle_error->("vm $vmid - property 'delete' is only allowed in [PENDING]\n");
             }
-        } elsif ($line =~ m/^([a-z][a-z_\-]*\d*):\s*(.+?)\s*$/) {
+        } elsif ($line =~ m/^([a-z][a-z0-9_\-]*):\s*(.+?)\s*$/) {
             my $key = $1;
             my $value = $2;
             if ($section->{name} eq 'cloudinit' && $section->{type} eq 'special') {
@@ -2943,7 +2953,7 @@ sub query_supported_cpu_flags {
     my $flags = {};
 
     my $kvm_supported = defined(kvm_version()) && $arch eq $host_arch;
-    my $qemu_cmd = PVE::QemuServer::Helpers::get_command_for_arch($arch);
+    my $qemu_cmd = PVE::QemuServer::Helpers::get_command_for_arch($arch, {});
     my $fakevmid = -1;
     my $pidfile = PVE::QemuServer::Helpers::vm_pidfile_name($fakevmid);
 
@@ -3117,7 +3127,7 @@ sub config_to_command {
     my $machine_conf = PVE::QemuServer::Machine::parse_machine($conf->{machine});
 
     my $arch = PVE::QemuServer::Helpers::get_vm_arch($conf);
-    my $kvm_binary = PVE::QemuServer::Helpers::get_command_for_arch($arch);
+    my $kvm_binary = PVE::QemuServer::Helpers::get_command_for_arch($arch, $conf);
     my $kvmver = kvm_user_version($kvm_binary);
 
     if (!$kvmver || $kvmver !~ m/^(\d+)\.(\d+)/ || $1 < 6) {

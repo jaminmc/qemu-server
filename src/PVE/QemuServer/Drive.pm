@@ -72,6 +72,39 @@ my $bios_desc = {
 
 PVE::JSONSchema::register_standard_option("pve-vm-bios", $bios_desc);
 
+my $qemu_binary_fmt = {
+    path => {
+        type => 'string',
+        format => 'pve-volume-id-or-qm-path',
+        format_description => 'volume',
+        description => "Path to custom QEMU binary (filesystem or storage volume)",
+        default_key => 1,
+    },
+    validate => {
+        type => 'boolean',
+        default => 1,
+        description => "Validate that binary is executable (default: 1)",
+        optional => 1,
+    },
+};
+
+my $qemu_binary_x86_64_desc = {
+    optional => 1,
+    type => 'string',
+    format => $qemu_binary_fmt,
+    description => "Custom QEMU binary for x86_64 VMs",
+};
+
+my $qemu_binary_aarch64_desc = {
+    optional => 1,
+    type => 'string',
+    format => $qemu_binary_fmt,
+    description => "Custom QEMU binary for aarch64 VMs",
+};
+
+PVE::JSONSchema::register_standard_option("pve-vm-qemu-binary-x86_64", $qemu_binary_x86_64_desc);
+PVE::JSONSchema::register_standard_option("pve-vm-qemu-binary-aarch64", $qemu_binary_aarch64_desc);
+
 # Check that a volume can be used for image-related operations with QEMU, in
 # particular, attached as VM image or ISO, used for qemu-img, or (live-)imported.
 # NOTE Currently, this helper cannot be used for backups.
