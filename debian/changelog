@@ -1,3 +1,15 @@
+qemu-server (9.5.0-jaminmc) trixie; urgency=medium
+
+  * NEW: Custom OVMF firmware support - allow specifying custom OVMF_CODE and
+    OVMF_VARS files directly in VM configuration. Supports both Proxmox storage
+    paths and absolute filesystem paths for custom UEFI BIOS.
+
+  * NEW: Custom QEMU binary support per architecture - enable using custom-built
+    QEMU binaries for specific architectures. Useful for OS detection bypass or
+    alternative builds. Supports optional executable validation.
+
+ -- JaminMc <1310376+jaminmc@users.noreply.github.com>  Thu, 19 Mar 2026 00:45:22 -0400
+
 qemu-server (9.1.5) trixie; urgency=medium
 
   * fix #1964: add 'guest-fsfreeze' QEMU guest agent setting to control
